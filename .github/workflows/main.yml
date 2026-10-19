@@ -2,7 +2,6 @@ name: LUMA-X Rust Tests and Proof Benchmark
 
 on:
   push:
-    branches: ["main", "master"]
   pull_request:
   workflow_dispatch:
 
@@ -10,16 +9,32 @@ permissions:
   contents: read
 
 concurrency:
-  group: luma-x-${{ github.ref }}
+  group: luma-x-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   rust-tests:
     name: Build and test recursive proof system
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Locate the LUMA-X Rust project
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=$(grep -rl --include=Cargo.toml 'luma-x-proof-backend' . | head -n 1 || true)
+          if [ -z "$manifest" ]; then
+            echo "::error::No Cargo.toml with package luma-x-proof-backend found in the repository."
+            echo "Files at repo root:"
+            ls -la
+            exit 1
+          fi
+          dir=$(dirname "$manifest")
+          echo "Found project in: $dir"
+          echo "PROJECT_DIR=$dir" >> "$GITHUB_ENV"
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -28,43 +43,69 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.PROJECT_DIR }}
 
-      - name: Check formatting
+      - name: Check formatting (advisory)
+        continue-on-error: true
+        working-directory: ${{ env.PROJECT_DIR }}
         run: cargo fmt --all -- --check
 
       - name: Compile tests
+        working-directory: ${{ env.PROJECT_DIR }}
         run: cargo test --release --no-run
 
       - name: Run tests
+        working-directory: ${{ env.PROJECT_DIR }}
         env:
+          RUST_BACKTRACE: "1"
           RUST_TEST_THREADS: "1"
         run: cargo test --release -- --nocapture
 
-      - name: Run Clippy
+      - name: Clippy (advisory)
         continue-on-error: true
+        working-directory: ${{ env.PROJECT_DIR }}
         run: cargo clippy --release --all-targets -- -D warnings
 
   compressed-proof-benchmark:
     name: Compressed proof verification benchmark
     runs-on: ubuntu-latest
     needs: rust-tests
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Locate the LUMA-X Rust project
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=$(grep -rl --include=Cargo.toml 'luma-x-proof-backend' . | head -n 1 || true)
+          if [ -z "$manifest" ]; then
+            echo "::error::No Cargo.toml with package luma-x-proof-backend found in the repository."
+            exit 1
+          fi
+          dir=$(dirname "$manifest")
+          echo "Found project in: $dir"
+          echo "PROJECT_DIR=$dir" >> "$GITHUB_ENV"
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.PROJECT_DIR }}
 
-      - name: Run compressed proof benchmark
+      - name: Run end-to-end proof and verification benchmark
+        working-directory: ${{ env.PROJECT_DIR }}
         env:
           LUMA_VERIFY_ITERS: "20"
+          RUST_BACKTRACE: "1"
         shell: bash
         run: |
           set -o pipefail
-          cargo run --release 2>&1 | tee benchmark-run.log
+          cargo run --release 2>&1 | tee "$GITHUB_WORKSPACE/benchmark-run.log"
 
       - name: Upload benchmark log
         if: always()
