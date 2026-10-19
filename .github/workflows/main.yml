@@ -25,9 +25,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          manifest=$(grep -rl --include=Cargo.toml 'luma-x-proof-backend' . | head -n 1 || true)
+          find_manifest() {
+            grep -rl --include=Cargo.toml 'luma-x-proof-backend' . 2>/dev/null | head -n 1 || true
+          }
+          manifest=$(find_manifest)
           if [ -z "$manifest" ]; then
-            echo "::error::No Cargo.toml with package luma-x-proof-backend found in the repository."
+            zip=$(find . -path ./.git -prune -o -type f -name '*.zip' -print | head -n 1)
+            if [ -n "$zip" ]; then
+              echo "Extracting $zip"
+              mkdir -p _luma_src
+              unzip -q -o "$zip" -d _luma_src
+              manifest=$(find_manifest)
+            fi
+          fi
+          if [ -z "$manifest" ]; then
+            echo "::error::No Cargo.toml with package luma-x-proof-backend found (checked repo and any zip)."
             echo "Files at repo root:"
             ls -la
             exit 1
@@ -80,9 +92,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          manifest=$(grep -rl --include=Cargo.toml 'luma-x-proof-backend' . | head -n 1 || true)
+          find_manifest() {
+            grep -rl --include=Cargo.toml 'luma-x-proof-backend' . 2>/dev/null | head -n 1 || true
+          }
+          manifest=$(find_manifest)
           if [ -z "$manifest" ]; then
-            echo "::error::No Cargo.toml with package luma-x-proof-backend found in the repository."
+            zip=$(find . -path ./.git -prune -o -type f -name '*.zip' -print | head -n 1)
+            if [ -n "$zip" ]; then
+              echo "Extracting $zip"
+              mkdir -p _luma_src
+              unzip -q -o "$zip" -d _luma_src
+              manifest=$(find_manifest)
+            fi
+          fi
+          if [ -z "$manifest" ]; then
+            echo "::error::No Cargo.toml with package luma-x-proof-backend found (checked repo and any zip)."
+            ls -la
             exit 1
           fi
           dir=$(dirname "$manifest")
