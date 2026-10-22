@@ -1,142 +1,126 @@
-name: LUMA-X Rust Tests and Proof Benchmark
+
+name: Nerva Rust Wallet - Build Android APK
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
+    inputs:
+      zip_path:
+        description: "Path to the uploaded ZIP file in the repository"
+        required: true
+        default: "nerva-wallet.zip"
+        type: string
+
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
 
-concurrency:
-  group: luma-x-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  rust-tests:
-    name: Build and test recursive proof system
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+  build:
+    runs-on: ubuntu-24.04
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Locate the LUMA-X Rust project
-        shell: bash
+      - name: Install archive tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip zip file \
+            build-essential pkg-config libssl-dev \
+            clang cmake ninja-build
+
+      - name: Locate and extract ZIP
+        env:
+          ZIP_PATH: ${{ inputs.zip_path || 'nerva-wallet.zip' }}
         run: |
           set -euo pipefail
-          find_manifest() {
-            grep -rl --include=Cargo.toml 'luma-x-proof-backend' . 2>/dev/null | head -n 1 || true
-          }
-          manifest=$(find_manifest)
-          if [ -z "$manifest" ]; then
-            zip=$(find . -path ./.git -prune -o -type f -name '*.zip' -print | head -n 1)
-            if [ -n "$zip" ]; then
-              echo "Extracting $zip"
-              mkdir -p _luma_src
-              unzip -q -o "$zip" -d _luma_src
-              manifest=$(find_manifest)
-            fi
-          fi
-          if [ -z "$manifest" ]; then
-            echo "::error::No Cargo.toml with package luma-x-proof-backend found (checked repo and any zip)."
-            echo "Files at repo root:"
-            ls -la
+
+          if [ ! -f "$ZIP_PATH" ]; then
+            echo "ZIP not found: $ZIP_PATH"
+            echo "ZIP files in repository:"
+            find . -type f -iname '*.zip'
             exit 1
           fi
-          dir=$(dirname "$manifest")
-          echo "Found project in: $dir"
-          echo "PROJECT_DIR=$dir" >> "$GITHUB_ENV"
 
-      - name: Install stable Rust
+          mkdir -p extracted
+          unzip -oq "$ZIP_PATH" -d extracted
+
+          echo "Extracted project files:"
+          find extracted -maxdepth 3 -type f | head -200
+
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          targets: aarch64-linux-android, armv7-linux-androideabi
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ${{ env.PROJECT_DIR }}
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Check formatting (advisory)
-        continue-on-error: true
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: cargo fmt --all -- --check
+      - name: Install Android NDK
+        run: sdkmanager "ndk;27.2.12479018"
 
-      - name: Compile tests
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: cargo test --release --no-run
-
-      - name: Run tests
-        working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          RUST_BACKTRACE: "1"
-          RUST_TEST_THREADS: "1"
-        run: cargo test --release -- --nocapture
-
-      - name: Clippy (advisory)
-        continue-on-error: true
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: cargo clippy --release --all-targets -- -D warnings
-
-  compressed-proof-benchmark:
-    name: Compressed proof verification benchmark
-    runs-on: ubuntu-latest
-    needs: rust-tests
-    timeout-minutes: 45
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Locate the LUMA-X Rust project
-        shell: bash
+      - name: Detect Rust projects
         run: |
           set -euo pipefail
-          find_manifest() {
-            grep -rl --include=Cargo.toml 'luma-x-proof-backend' . 2>/dev/null | head -n 1 || true
-          }
-          manifest=$(find_manifest)
-          if [ -z "$manifest" ]; then
-            zip=$(find . -path ./.git -prune -o -type f -name '*.zip' -print | head -n 1)
-            if [ -n "$zip" ]; then
-              echo "Extracting $zip"
-              mkdir -p _luma_src
-              unzip -q -o "$zip" -d _luma_src
-              manifest=$(find_manifest)
-            fi
-          fi
-          if [ -z "$manifest" ]; then
-            echo "::error::No Cargo.toml with package luma-x-proof-backend found (checked repo and any zip)."
-            ls -la
+
+          find extracted -name Cargo.toml -print
+
+          if ! find extracted -name Cargo.toml -print -quit \
+             | grep -q .; then
+            echo "No Cargo.toml found."
+            echo "The ZIP may contain a C++ project, not a Rust project."
             exit 1
           fi
-          dir=$(dirname "$manifest")
-          echo "Found project in: $dir"
-          echo "PROJECT_DIR=$dir" >> "$GITHUB_ENV"
 
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ${{ env.PROJECT_DIR }}
-
-      - name: Run end-to-end proof and verification benchmark
-        working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          LUMA_VERIFY_ITERS: "20"
-          RUST_BACKTRACE: "1"
-        shell: bash
+      - name: Run Rust tests
         run: |
-          set -o pipefail
-          cargo run --release 2>&1 | tee "$GITHUB_WORKSPACE/benchmark-run.log"
+          set -euo pipefail
 
-      - name: Upload benchmark log
+          MANIFEST="$(find extracted -name Cargo.toml \
+            -print -quit)"
+          PROJECT_DIR="$(dirname "$MANIFEST")"
+
+          cd "$PROJECT_DIR"
+          cargo test --workspace --locked
+
+      - name: Build Android Rust libraries
+        run: |
+          set -euo pipefail
+
+          MANIFEST="$(find extracted -name Cargo.toml \
+            -print -quit)"
+          PROJECT_DIR="$(dirname "$MANIFEST")"
+
+          cd "$PROJECT_DIR"
+
+          cargo build --release \
+            --target aarch64-linux-android
+
+      - name: Package build outputs
+        if: always()
+        run: |
+          mkdir -p artifacts
+          find extracted -type f \
+            \( -name '*.apk' -o -name '*.aab' \
+            -o -name '*.so' \) \
+            -exec cp --parents {} artifacts/ \; || true
+
+          if [ -d artifacts ]; then
+            cd artifacts
+            zip -qr ../nerva-build-artifacts.zip .
+          fi
+
+      - name: Upload build artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: luma-x-compressed-proof-benchmark
-          path: benchmark-run.log
+          name: nerva-wallet-build
+          path: |
+            nerva-build-artifacts.zip
+            extracted/**/target/**/*.so
+            extracted/**/*.apk
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 14
