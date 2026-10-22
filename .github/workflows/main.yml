@@ -1,4 +1,199 @@
 
+name: Nerva Rust Wallet - Android Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: "Optional path to project ZIP; leave blank to auto-detect"
+        required: false
+        default: ""
+        type: string
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip zip file \
+            build-essential pkg-config libssl-dev \
+            clang cmake ninja-build
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: sdkmanager "ndk;27.2.12479018"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi
+
+      - name: Find and extract project ZIP
+        env:
+          REQUESTED_ZIP: ${{ inputs.zip_path || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_PATH="$REQUESTED_ZIP"
+
+          if [[ -z "$ZIP_PATH" ]]; then
+            mapfile -t ZIP_FILES < <(
+              find . -maxdepth 1 -type f -iname '*.zip' \
+                ! -name 'logs_*.zip' \
+                ! -name 'nerva-build-artifacts.zip' \
+                ! -name 'nerva-wallet-android-artifacts.zip' \
+                | sort
+            )
+
+            if [[ ${#ZIP_FILES[@]} -eq 0 ]]; then
+              echo "ERROR: No project ZIP found in repository root."
+              exit 1
+            elif [[ ${#ZIP_FILES[@]} -gt 1 ]]; then
+              echo "Multiple ZIP files found. Specify zip_path:"
+              printf ' - %s\n' "${ZIP_FILES[@]}"
+              exit 1
+            fi
+
+            ZIP_PATH="${ZIP_FILES[0]}"
+          fi
+
+          if [[ ! -f "$ZIP_PATH" ]]; then
+            echo "ERROR: ZIP not found: $ZIP_PATH"
+            find . -maxdepth 1 -type f -iname '*.zip'
+            exit 1
+          fi
+
+          echo "Using ZIP: $ZIP_PATH"
+          unzip -t "$ZIP_PATH"
+
+          mkdir -p extracted
+          unzip -oq "$ZIP_PATH" -d extracted
+
+          echo "Extracted project files:"
+          find extracted -maxdepth 4 -type f | sort | head -200
+
+      - name: Run Rust tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t MANIFESTS < <(
+            find extracted -type f -name Cargo.toml \
+              -not -path '*/target/*' | sort
+          )
+
+          if [[ ${#MANIFESTS[@]} -eq 0 ]]; then
+            echo "ERROR: No Cargo.toml found."
+            exit 1
+          fi
+
+          MANIFEST=""
+          for candidate in "${MANIFESTS[@]}"; do
+            if grep -q '^\[workspace\]' "$candidate"; then
+              MANIFEST="$candidate"
+              break
+            fi
+          done
+
+          if [[ -z "$MANIFEST" ]]; then
+            MANIFEST="${MANIFESTS[0]}"
+          fi
+
+          PROJECT_DIR="$(dirname "$MANIFEST")"
+          cd "$PROJECT_DIR"
+
+          if [[ -f Cargo.lock ]]; then
+            cargo test --workspace --locked
+          else
+            cargo test --workspace
+          fi
+
+      - name: Build Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          GRADLEW="$(
+            find extracted -type f -name gradlew \
+              -not -path '*/.gradle/*' -print -quit
+          )"
+
+          if [[ -z "$GRADLEW" ]]; then
+            echo "ERROR: No Gradle wrapper found."
+            echo "A Rust project alone cannot produce an Android APK."
+            echo "Include a complete Android Gradle project."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$GRADLEW")"
+          cd "$PROJECT_DIR"
+
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleDebug
+
+          APK_COUNT="$(
+            find . -type f \
+              -path '*/build/outputs/apk/*/*.apk' | wc -l
+          )"
+
+          if [[ "$APK_COUNT" -eq 0 ]]; then
+            echo "ERROR: No APK produced."
+            exit 1
+          fi
+
+          find . -type f \
+            -path '*/build/outputs/apk/*/*.apk' -print
+
+      - name: Package APK and native libraries
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+
+          find extracted -type f \
+            -path '*/build/outputs/apk/*/*.apk' \
+            -exec cp --parents {} artifacts/ \;
+
+          find extracted -type f \
+            -path '*/target/*/release/*.so' \
+            -exec cp --parents {} artifacts/ \; || true
+
+          cd artifacts
+          zip -qr ../nerva-wallet-android-artifacts.zip .
+
+      - name: Upload build artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nerva-wallet-android
+          path: |
+            nerva-wallet-android-artifacts.zip
+            extracted/**/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
 name: Nerva Rust Wallet - Build Android APK
 
 on:
