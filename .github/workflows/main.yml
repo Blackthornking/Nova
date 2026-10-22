@@ -1,4 +1,3 @@
-
 name: Nerva Rust Wallet - Android Build
 
 on:
@@ -37,11 +36,18 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
 
-      - name: Install Android NDK
-        run: sdkmanager "ndk;27.2.12479018"
+      - name: Set up Android SDK and NDK
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" \
+            "build-tools;35.0.0" "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -149,8 +155,14 @@ jobs:
           PROJECT_DIR="$(dirname "$GRADLEW")"
           cd "$PROJECT_DIR"
 
-          chmod +x ./gradlew
-          ./gradlew --no-daemon assembleDebug
+          # The ZIP ships gradle-wrapper.properties but not gradle-wrapper.jar,
+          # so fall back to the Gradle 8.9 installed by setup-gradle.
+          if [[ -f gradle/wrapper/gradle-wrapper.jar ]]; then
+            chmod +x ./gradlew
+            ./gradlew --no-daemon assembleDebug
+          else
+            gradle --no-daemon assembleDebug
+          fi
 
           APK_COUNT="$(
             find . -type f \
